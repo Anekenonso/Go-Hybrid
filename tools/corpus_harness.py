@@ -184,6 +184,8 @@ def main():
         print("build it first: cd compiler && cargo build -p hyb", file=sys.stderr)
         return 2
 
+    args.bin = os.path.abspath(args.bin)
+
     files = sorted(
         f for f in os.listdir(args.corpus) if f.endswith(".hy")
     )

@@ -1,6 +1,7 @@
 """CLI regressions for optional exact diagnostic metadata (stdlib only)."""
 
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
@@ -155,6 +156,147 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
                                             "warnings": 0, "future": "kept"},
                                 "diagnostics": [], "version": 1, "future": {}})
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+
+@unittest.skipIf(os.name != "posix", "executable script resolution tests require POSIX")
+class CheckerPathCliTests(unittest.TestCase):
+    def make_checker(self, path, payload, exit_code=0):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"#!{sys.executable}\nimport json\n"
+            f"print(json.dumps({payload!r}))\nraise SystemExit({exit_code})\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    def run_harness_cli(self, bin_arg, corpus_dir, cwd=None, env=None):
+        return subprocess.run(
+            [sys.executable, str(HARNESS), "--bin", bin_arg, "--corpus", str(corpus_dir)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=cwd,
+            env=env,
+        )
+
+    def test_bare_name_prefers_local_checker_over_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "workdir"
+            workdir.mkdir()
+            pathdir = root / "pathdir"
+            pathdir.mkdir()
+
+            corpus = workdir / "corpus"
+            corpus.mkdir()
+            (corpus / "01-test.hy").write_text("// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+
+            self.make_checker(workdir / "hyb", {"summary": {"verdict": "accept"}, "diagnostics": []}, exit_code=0)
+            self.make_checker(pathdir / "hyb", {
+                "summary": {"verdict": "reject", "errors": 1},
+                "diagnostics": [{"severity": "error", "tier0_rule": "A1c"}],
+            }, exit_code=1)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{pathdir}{os.pathsep}{env.get('PATH', '')}"
+
+            run = self.run_harness_cli("hyb", corpus, cwd=str(workdir), env=env)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("verdict agreement: 1/1", run.stdout)
+
+    def test_bare_name_prefers_local_reject_over_path_accept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "workdir"
+            workdir.mkdir()
+            pathdir = root / "pathdir"
+            pathdir.mkdir()
+
+            corpus = workdir / "corpus"
+            corpus.mkdir()
+            (corpus / "01-test.hy").write_text("// EXPECTED-VERDICT: REJECT A1c\nfn main() {}\n", encoding="utf-8")
+
+            self.make_checker(workdir / "hyb", {
+                "summary": {"verdict": "reject", "errors": 1},
+                "diagnostics": [{"severity": "error", "tier0_rule": "A1c"}],
+            }, exit_code=1)
+            self.make_checker(pathdir / "hyb", {"summary": {"verdict": "accept"}, "diagnostics": []}, exit_code=0)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{pathdir}{os.pathsep}{env.get('PATH', '')}"
+
+            run = self.run_harness_cli("hyb", corpus, cwd=str(workdir), env=env)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("verdict agreement: 1/1", run.stdout)
+
+    def test_bare_name_missing_locally_fails_even_if_present_in_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "workdir"
+            workdir.mkdir()
+            pathdir = root / "pathdir"
+            pathdir.mkdir()
+
+            corpus = workdir / "corpus"
+            corpus.mkdir()
+            (corpus / "01-test.hy").write_text("// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+
+            self.make_checker(pathdir / "hyb", {"summary": {"verdict": "accept"}, "diagnostics": []}, exit_code=0)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{pathdir}{os.pathsep}{env.get('PATH', '')}"
+
+            run = self.run_harness_cli("hyb", corpus, cwd=str(workdir), env=env)
+            self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+            self.assertIn("error: checker binary not found: hyb", run.stderr)
+
+    def test_relative_path_with_parent_reference_resolves_and_executes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "workdir"
+            workdir.mkdir()
+            corpus = workdir / "corpus"
+            corpus.mkdir()
+            (corpus / "01-test.hy").write_text("// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+
+            checker_dir = workdir / "nested" / "bin"
+            self.make_checker(checker_dir / "hyb", {"summary": {"verdict": "accept"}, "diagnostics": []}, exit_code=0)
+
+            run = self.run_harness_cli("nested/../nested/bin/hyb", corpus, cwd=str(workdir))
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("verdict agreement: 1/1", run.stdout)
+
+    def test_relative_path_with_spaces_resolves_and_executes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "workdir"
+            workdir.mkdir()
+            corpus = workdir / "corpus"
+            corpus.mkdir()
+            (corpus / "01-test.hy").write_text("// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+
+            checker_dir = workdir / "dir with spaces"
+            self.make_checker(checker_dir / "hyb", {"summary": {"verdict": "accept"}, "diagnostics": []}, exit_code=0)
+
+            run = self.run_harness_cli("dir with spaces/hyb", corpus, cwd=str(workdir))
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("verdict agreement: 1/1", run.stdout)
+
+    def test_absolute_path_resolves_and_executes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "workdir"
+            workdir.mkdir()
+            corpus = workdir / "corpus"
+            corpus.mkdir()
+            (corpus / "01-test.hy").write_text("// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+
+            checker = root / "bin" / "hyb"
+            self.make_checker(checker, {"summary": {"verdict": "accept"}, "diagnostics": []}, exit_code=0)
+
+            run = self.run_harness_cli(str(checker), corpus, cwd=str(workdir))
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("verdict agreement: 1/1", run.stdout)
 
 
 if __name__ == "__main__":
