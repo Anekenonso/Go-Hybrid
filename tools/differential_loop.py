@@ -109,13 +109,30 @@ def checker_rejects(bin_path, hy_path, expected_rule):
         payload = json.loads(out)
     except json.JSONDecodeError:
         return False, "no/invalid checker JSON"
+    if not isinstance(payload, dict):
+        return False, "invalid checker JSON envelope: expected an object"
     summary = payload.get("summary", {})
+    diags = payload.get("diagnostics", [])
+    if (not isinstance(summary, dict) or not isinstance(diags, list)
+            or any(not isinstance(d, dict) for d in diags)):
+        return False, "invalid checker JSON envelope: summary/diagnostics"
+    # Match the corpus harness's protocol checks. A contradictory count
+    # cannot establish rejection agreement, even with a matching rule.
+    # Older checker fixtures may omit counts entirely.
+    for field, severity in (("errors", "error"), ("warnings", "warning")):
+        if field in summary:
+            count = summary[field]
+            actual = sum(d.get("severity") == severity for d in diags)
+            if type(count) is not int or count < 0 or count != actual:
+                return False, (
+                    f"checker summary inconsistent: {field}={count!r}, "
+                    f"diagnostics={actual}"
+                )
     if proc.returncode != 1:
         return False, (
             f"checker exit/verdict mismatch: exit {proc.returncode}, "
             f"verdict={summary.get('verdict')}"
         )
-    diags = payload.get("diagnostics", [])
     errors = [d for d in diags if d.get("severity") == "error"]
     first_rule = errors[0].get("tier0_rule") if errors else None
     return (
