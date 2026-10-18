@@ -82,6 +82,18 @@ impl Emitter {
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                     }
+                    if let TypeExpr::Array { len, elem, .. } = exp {
+                        let len_str = match len {
+                            Some(l) => self.expr_text_static(l),
+                            None => "...".to_string(),
+                        };
+                        let head = format!("[{}]{}", len_str, self.type_text(elem));
+                        let mut parts = Vec::new();
+                        for i in items {
+                            parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
+                        }
+                        return Ok(format!("{}{{{}}}", head, parts.join(", ")));
+                    }
                 }
                 _ => {}
             }
@@ -220,6 +232,18 @@ impl Emitter {
                     // Elided struct elements inherit the slice's element
                     // type (Batch I, corpus 09).
                     parts.push(self.emit_expr_exp(i, 0, elem.as_deref())?);
+                }
+                Ok(format!("{}{{{}}}", head, parts.join(", ")))
+            }
+
+            Expr::ArrayLit { len, elem, items, .. } => {
+                let head = match len {
+                    Some(l) => format!("[{}]{}", self.expr_text_static(l), self.type_text(elem)),
+                    None => format!("[...]{}", self.type_text(elem)),
+                };
+                let mut parts = Vec::new();
+                for i in items {
+                    parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
                 }
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
             }
@@ -722,6 +746,30 @@ impl Emitter {
                 return Ok(format!(
                     "[]{}({})",
                     self.type_text(t),
+                    parts.join(", ")
+                ));
+            }
+        }
+        if let Expr::ArrayLit {
+            len,
+            elem,
+            items,
+            ..
+        } = callee
+        {
+            if items.is_empty() {
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
+                }
+                let len_str = match len {
+                    Some(l) => self.expr_text_static(l),
+                    None => "...".to_string(),
+                };
+                return Ok(format!(
+                    "[{}]{}({})",
+                    len_str,
+                    self.type_text(elem),
                     parts.join(", ")
                 ));
             }

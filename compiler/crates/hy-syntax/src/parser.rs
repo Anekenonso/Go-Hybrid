@@ -655,7 +655,8 @@ impl Parser {
     /// Can the current token begin a type?
     fn is_type_start(&self) -> bool {
         match self.cur() {
-            Tok::Punct("*") | Tok::Punct("[") | Tok::Kw("chan") | Tok::Kw("fn") => true,
+            Tok::Punct("*") | Tok::Punct("[") | Tok::Kw("chan") => true,
+            Tok::Kw("fn") => matches!(self.nth(1), Tok::Punct("(")),
             Tok::Punct("<-") => matches!(self.nth(1), Tok::Kw("chan")),
             Tok::Ident(_) => true,
             _ => false,
@@ -1887,7 +1888,8 @@ impl Parser {
     }
 
     /// Operand-start `[`: `[]T{…}` typed slice literal, `[]T` type-as-value
-    /// (make argument), or `[a, b, c]` untyped composite literal.
+    /// (make argument), `[N]T{…}` typed array literal, `[N]T` type-as-value,
+    /// `[...]T{…}` array literal, or `[a, b, c]` untyped composite literal.
     fn parse_bracket_literal(&mut self, start: usize) -> PResult<Expr> {
         self.bump(); // [
         if self.eat_punct("]") {
@@ -1916,21 +1918,92 @@ impl Parser {
                     span: self.span_from(start),
                 })
             }
-        } else {
-            let mut items = Vec::new();
-            while !self.at_punct("]") && !self.at_eof() {
-                items.push(self.parse_expr(true)?);
-                if !self.at_punct(",") && !self.at_punct("]") {
-                    return self.err("expected ',' or ']' in composite literal");
-                }
-                self.eat_punct(",");
-            }
+        } else if self.eat_punct("...") {
             self.expect_punct("]")?;
-            Ok(Expr::SliceLit {
-                elem: None,
-                items,
-                span: self.span_from(start),
-            })
+            let elem = Box::new(self.parse_type()?);
+            if self.at_punct("{") {
+                self.bump();
+                let mut items = Vec::new();
+                while !self.at_punct("}") && !self.at_eof() {
+                    items.push(self.parse_expr(true)?);
+                    if !self.at_punct(",") && !self.at_punct("}") {
+                        return self.err("expected ',' or '}' in array literal");
+                    }
+                    self.eat_punct(",");
+                }
+                self.expect_punct("}")?;
+                Ok(Expr::ArrayLit {
+                    len: None,
+                    elem,
+                    items,
+                    span: self.span_from(start),
+                })
+            } else {
+                Ok(Expr::ArrayLit {
+                    len: None,
+                    elem,
+                    items: Vec::new(),
+                    span: self.span_from(start),
+                })
+            }
+        } else {
+            let first = self.parse_expr(true)?;
+            if self.eat_punct(",") {
+                let mut items = vec![first];
+                while !self.at_punct("]") && !self.at_eof() {
+                    items.push(self.parse_expr(true)?);
+                    if !self.at_punct(",") && !self.at_punct("]") {
+                        return self.err("expected ',' or ']' in composite literal");
+                    }
+                    self.eat_punct(",");
+                }
+                self.expect_punct("]")?;
+                Ok(Expr::SliceLit {
+                    elem: None,
+                    items,
+                    span: self.span_from(start),
+                })
+            } else if self.eat_punct("]") {
+                let same_line = self.toks[self.pos].span.start.line == self.toks[self.pos - 1].span.end.line;
+                if same_line && self.is_type_start() {
+                    let elem = Box::new(self.parse_type()?);
+                    if self.at_punct("{") {
+                        self.bump();
+                        let mut items = Vec::new();
+                        while !self.at_punct("}") && !self.at_eof() {
+                            items.push(self.parse_expr(true)?);
+                            if !self.at_punct(",") && !self.at_punct("}") {
+                                return self.err("expected ',' or '}' in array literal");
+                            }
+                            self.eat_punct(",");
+                        }
+                        self.expect_punct("}")?;
+                        Ok(Expr::ArrayLit {
+                            len: Some(Box::new(first)),
+                            elem,
+                            items,
+                            span: self.span_from(start),
+                        })
+                    } else {
+                        // `[N]T` as a value
+                        Ok(Expr::ArrayLit {
+                            len: Some(Box::new(first)),
+                            elem,
+                            items: Vec::new(),
+                            span: self.span_from(start),
+                        })
+                    }
+                } else {
+                    // Single-item untyped slice literal `[first]`
+                    Ok(Expr::SliceLit {
+                        elem: None,
+                        items: vec![first],
+                        span: self.span_from(start),
+                    })
+                }
+            } else {
+                return self.err("expected ',' or ']' in composite literal");
+            }
         }
     }
 
@@ -3928,6 +4001,68 @@ fn main() {
             "wrapped send value must stay one send, got {:?}",
             stmt
         );
+    }
+
+    #[test]
+    fn array_composite_literal_parsing_issue_643() {
+        // [N]T{}
+        let f = parse_src("fn main() {\n    a := [3]int{}\n}");
+        let stmt = first_stmt(&f);
+        match stmt {
+            Stmt::Local(LocalDecl { values, .. }) => match &values[0] {
+                Expr::ArrayLit { len, elem, items, .. } => {
+                    assert!(len.is_some(), "expected Some(len)");
+                    assert_eq!(elem.render(), "int");
+                    assert!(items.is_empty(), "expected 0 items");
+                }
+                other => panic!("expected ArrayLit, got {:?}", other),
+            },
+            other => panic!("expected Stmt::Local, got {:?}", other),
+        }
+
+        // [N]T{1, 2, 3}
+        let f = parse_src("fn main() {\n    a := [3]int{1, 2, 3}\n}");
+        let stmt = first_stmt(&f);
+        match stmt {
+            Stmt::Local(LocalDecl { values, .. }) => match &values[0] {
+                Expr::ArrayLit { len, elem, items, .. } => {
+                    assert!(len.is_some(), "expected Some(len)");
+                    assert_eq!(elem.render(), "int");
+                    assert_eq!(items.len(), 3, "expected 3 items");
+                }
+                other => panic!("expected ArrayLit, got {:?}", other),
+            },
+            other => panic!("expected Stmt::Local, got {:?}", other),
+        }
+
+        // [...]T{1, 2}
+        let f = parse_src("fn main() {\n    a := [...]int{1, 2}\n}");
+        let stmt = first_stmt(&f);
+        match stmt {
+            Stmt::Local(LocalDecl { values, .. }) => match &values[0] {
+                Expr::ArrayLit { len, elem, items, .. } => {
+                    assert!(len.is_none(), "expected None len for [...]");
+                    assert_eq!(elem.render(), "int");
+                    assert_eq!(items.len(), 2, "expected 2 items");
+                }
+                other => panic!("expected ArrayLit, got {:?}", other),
+            },
+            other => panic!("expected Stmt::Local, got {:?}", other),
+        }
+
+        // [0] followed by newline remains a SliceLit (single item)
+        let f = parse_src("fn main() {\n    cells := [0]\n    x := 1\n}");
+        let stmt = first_stmt(&f);
+        match stmt {
+            Stmt::Local(LocalDecl { values, .. }) => match &values[0] {
+                Expr::SliceLit { elem, items, .. } => {
+                    assert!(elem.is_none());
+                    assert_eq!(items.len(), 1);
+                }
+                other => panic!("expected SliceLit, got {:?}", other),
+            },
+            other => panic!("expected Stmt::Local, got {:?}", other),
+        }
     }
 
 }

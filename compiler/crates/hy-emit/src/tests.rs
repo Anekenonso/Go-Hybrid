@@ -2529,3 +2529,18 @@ fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
         go
     );
 }
+
+#[test]
+fn array_composite_literal_emits_valid_go() {
+    let go = emit("fn main() {\n    a := [3]int{}\n    b := [3]int{1, 2, 3}\n    c := [...]int{4, 5}\n}\n");
+    assert!(go.contains("a := [3]int{}"), "expected [3]int{{}}, got:\n{}", go);
+    assert!(go.contains("b := [3]int{1, 2, 3}"), "expected [3]int{{1, 2, 3}}, got:\n{}", go);
+    assert!(go.contains("c := [...]int{4, 5}"), "expected [...]int{{4, 5}}, got:\n{}", go);
+
+    let go_const = emit("const arr = [2]int{1, 2}\nfn main() {}\n");
+    assert!(
+        go_const.contains("var arr = [2]int{1, 2}"),
+        "const array composite lowers to var, got:\n{}",
+        go_const
+    );
+}

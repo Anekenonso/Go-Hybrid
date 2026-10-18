@@ -285,6 +285,7 @@ impl<'a> Checker<'a> {
                     .map(|i| self.shape_of_expr(st, i))
                     .unwrap_or(TypeShape::Unknown),
             })),
+            Expr::ArrayLit { elem, .. } => TypeShape::Array(Box::new(self.shape_of_type(elem))),
             // closures are unsendable values in Tier 0 (the A5 perimeter);
             // classify_value rejects FnLit literals before shape lookup —
             // this arm covers fn-typed bindings and fn-typed fields

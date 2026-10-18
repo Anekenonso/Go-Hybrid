@@ -763,6 +763,15 @@ impl<'a> Collector<'a> {
                     self.expr(i);
                 }
             }
+            Expr::ArrayLit { len, elem, items, .. } => {
+                if let Some(l) = len {
+                    self.expr(l);
+                }
+                self.ty(elem);
+                for i in items {
+                    self.expr(i);
+                }
+            }
             Expr::MapLit {
                 key,
                 value,
@@ -1078,6 +1087,10 @@ impl<'a> Collector<'a> {
                     .or_else(|| items.first().map(|i| self.kind_of_expr(i)))
                     .unwrap_or(OpKind::Unknown);
                 OpKind::Slice(Box::new(ek))
+            }
+            Expr::ArrayLit { elem, .. } => {
+                let ek = self.kind_of_ty(elem, 0);
+                OpKind::Array(Box::new(ek))
             }
             Expr::MapLit { key, value, .. } => OpKind::Map(
                 Box::new(self.kind_of_ty(key, 0)),
