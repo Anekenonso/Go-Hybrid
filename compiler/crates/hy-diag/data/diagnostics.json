@@ -395,6 +395,21 @@
       "tier0_rule_id": "A1c"
     },
     {
+      "code": "HYB-E3012",
+      "name": "channel-direction-mismatch",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "channel direction mismatch at value-flow coercion site",
+      "summary": "Go's implicit channel conversion is strictly one-way: a bidirectional `chan T` may be used where `chan<- T` or `<-chan T` is wanted, but a unidirectional channel may never be converted to the opposite direction, widened back to bidirectional `chan T`, or passed where a different direction is declared. Coercion sites—including variable ascriptions (`var rc <-chan T = sc`), assignments (`rc = sc`), call/task/method arguments (`take_rc(sc)`), return statements (`return sc`), struct-literal fields (`holder{ch: sc}`), map stores (`m[k] = sc`), and channel-of-channel sends (`outer <- rc`)—reject incompatible channel directions at check time (issue #623).",
+      "fixits": [
+        "declare the source channel as bidirectional `chan T` so it can coerce to unidirectional",
+        "ascribe or declare the target slot's direction to match the source channel (`chan<- T` or `<-chan T`)"
+      ],
+      "example": "var sc chan<- int = make(chan int, 1)\nvar rc <-chan int = sc   // reject: HYB-E3012 — cannot coerce chan<- int to <-chan int",
+      "rule": "O4",
+      "tier0_rule_id": "A1d"
+    },
+    {
       "code": "HYB-E3101",
       "name": "handle-loan-conflict",
       "category": "ownership-loans",

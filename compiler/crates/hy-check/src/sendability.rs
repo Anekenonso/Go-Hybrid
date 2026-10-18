@@ -1322,6 +1322,7 @@ impl<'a> Checker<'a> {
             return;
         };
         let mut env = ChanDirEnv::new();
+        env.push_return_types(f.results.iter().map(|r| r.ty.clone()).collect());
         if let Some(r) = &f.receiver {
             env.define(&r.name, Some(r.ty.clone()));
         }
@@ -1346,6 +1347,9 @@ impl<'a> Checker<'a> {
                     self.walk_expr_chan_dir(v, env);
                 }
                 if let Some(ty) = &l.ty {
+                    for v in &l.values {
+                        self.check_chan_dir_coercion(v, ty, env, v.span());
+                    }
                     for name in &l.names {
                         if name != "_" {
                             env.define(name, Some(ty.clone()));
@@ -1377,6 +1381,21 @@ impl<'a> Checker<'a> {
                 for v in values {
                     self.walk_expr_chan_dir(v, env);
                 }
+                if targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values) {
+                        if let Some(target_ty) = self.dir_ty_of_place(t, env) {
+                            self.check_chan_dir_coercion(v, &target_ty, env, v.span());
+                        }
+                    }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    if let Some(tys) = self.dir_multi_ty_of_call(&values[0], env) {
+                        for (t, val_ty) in targets.iter().zip(&tys) {
+                            if let Some(target_ty) = self.dir_ty_of_place(t, env) {
+                                self.check_chan_dir_types_coercion(val_ty, &target_ty, t.span);
+                            }
+                        }
+                    }
+                }
             }
             Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
                 self.walk_expr_chan_dir(expr, env);
@@ -1389,6 +1408,11 @@ impl<'a> Checker<'a> {
                     Some(hy_syntax::ChanDir::Recv)
                 ) {
                     self.emit_send_recv_only(chan, *span);
+                }
+                if let Some(chan_ty) = self.dir_ty_of_expr(chan, env) {
+                    if let hy_syntax::TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {
+                        self.check_chan_dir_coercion(value, &elem, env, *span);
+                    }
                 }
                 self.walk_expr_chan_dir(chan, env);
                 self.walk_expr_chan_dir(value, env);
@@ -1454,9 +1478,19 @@ impl<'a> Checker<'a> {
                 for v in values {
                     self.walk_expr_chan_dir(v, env);
                 }
+                if let Some(expected_tys) = env.current_return_types() {
+                    for (v, target_ty) in values.iter().zip(expected_tys) {
+                        self.check_chan_dir_coercion(v, target_ty, env, v.span());
+                    }
+                }
             }
             Stmt::Task { callee, args, .. } => {
                 self.walk_expr_chan_dir(callee, env);
+                if let Some(param_tys) = self.dir_param_tys_of_callee(callee, env) {
+                    for (a, param_ty) in args.iter().zip(&param_tys) {
+                        self.check_chan_dir_coercion(&a.value, param_ty, env, a.span);
+                    }
+                }
                 for a in args {
                     self.walk_expr_chan_dir(&a.value, env);
                 }
@@ -1491,6 +1525,11 @@ impl<'a> Checker<'a> {
                                 Some(hy_syntax::ChanDir::Recv)
                             ) {
                                 self.emit_send_recv_only(chan, chan.span().to(value.span()));
+                            }
+                            if let Some(chan_ty) = self.dir_ty_of_expr(chan, env) {
+                                if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {
+                                    self.check_chan_dir_coercion(value, &elem, env, chan.span().to(value.span()));
+                                }
                             }
                             self.walk_expr_chan_dir(chan, env);
                             self.walk_expr_chan_dir(value, env);
@@ -1566,6 +1605,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if let Some(param_tys) = self.dir_param_tys_of_callee(callee, env) {
+                    for (a, param_ty) in args.iter().zip(&param_tys) {
+                        self.check_chan_dir_coercion(&a.value, param_ty, env, a.span);
+                    }
+                }
                 self.walk_expr_chan_dir(callee, env);
                 for a in args {
                     self.walk_expr_chan_dir(&a.value, env);
@@ -1605,18 +1649,36 @@ impl<'a> Checker<'a> {
                     self.walk_expr_chan_dir(hi, env);
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(st_ty) = ty {
+                    let resolved = self.resolve_type_alias(st_ty);
+                    if let Some(sname) = Self::base_named_type(&resolved) {
+                        if let Some(field_defs) = self.structs.get(&sname).cloned() {
+                            for f in fields {
+                                if let Some((_, fty)) = field_defs.iter().find(|(n, _)| n == &f.name) {
+                                    self.check_chan_dir_coercion(&f.value, fty, env, f.span);
+                                }
+                            }
+                        }
+                    }
+                }
                 for f in fields {
                     self.walk_expr_chan_dir(&f.value, env);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { items, elem, .. } => {
+                if let Some(e) = elem {
+                    for i in items {
+                        self.check_chan_dir_coercion(i, e, env, i.span());
+                    }
+                }
                 for i in items {
                     self.walk_expr_chan_dir(i, env);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit { entries, value, .. } => {
                 for (k, v) in entries {
+                    self.check_chan_dir_coercion(v, value, env, v.span());
                     self.walk_expr_chan_dir(k, env);
                     self.walk_expr_chan_dir(v, env);
                 }
@@ -1628,14 +1690,16 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { params, body, .. } => {
+            Expr::FnLit { params, results, body, .. } => {
                 env.push();
+                env.push_return_types(results.iter().map(|r| r.ty.clone()).collect());
                 for p in params {
                     env.define(&p.name, Some(p.ty.clone()));
                 }
                 for s in &body.stmts {
                     self.walk_stmt_chan_dir(s, env);
                 }
+                env.pop_return_types();
                 env.pop();
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
@@ -1925,17 +1989,190 @@ impl<'a> Checker<'a> {
             Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes),
         );
     }
+
+    fn dir_ty_of_place(&self, place: &hy_syntax::Place, env: &ChanDirEnv) -> Option<hy_syntax::TypeExpr> {
+        use hy_syntax::{PlaceKind, TypeExpr};
+        match &place.kind {
+            PlaceKind::Ident(name) => {
+                if let Some(found) = env.lookup(name) {
+                    return found;
+                }
+                self.consts.get(name).and_then(|b| b.ty.clone())
+            }
+            PlaceKind::Index { base, .. } => {
+                let base_ty = self.dir_ty_of_place(base, env)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. }
+                    | TypeExpr::Array { elem, .. }
+                    | TypeExpr::Map { value: elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            PlaceKind::Field { base, name } => {
+                let base_ty = self.dir_ty_of_place(base, env)?;
+                let resolved = self.resolve_type_alias(&base_ty);
+                let sname = Self::base_named_type(&resolved)?;
+                self.structs
+                    .get(&sname)
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
+                    .map(|(_, t)| t.clone())
+            }
+            PlaceKind::AddrOf { base } => {
+                self.dir_ty_of_place(base, env).map(|t| TypeExpr::Pointer {
+                    to: Box::new(t),
+                    span: place.span,
+                })
+            }
+        }
+    }
+
+    fn dir_param_tys_of_callee(
+        &self,
+        callee: &Expr,
+        env: &ChanDirEnv,
+    ) -> Option<Vec<hy_syntax::TypeExpr>> {
+        use hy_syntax::TypeExpr;
+        match unwrap_parens(callee) {
+            Expr::FnLit { params, .. } => Some(params.iter().map(|p| p.ty.clone()).collect()),
+            Expr::Ident { name, .. } => {
+                if let Some(Some(bty)) = env.lookup(name) {
+                    if let TypeExpr::Fn { params, .. } = self.resolve_type_alias(&bty) {
+                        return Some(params.iter().map(|p| p.ty.clone()).collect());
+                    }
+                    return None;
+                }
+                let head = Self::base_named_type_str(name);
+                self.fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(head))
+                    .map(|f| f.params.iter().map(|p| p.ty.clone()).collect())
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
+                    if !env.is_bound(root) {
+                        let full = format!("{}.{}", root, head);
+                        if let Some(f) = self.fns.get(full.as_str()) {
+                            return Some(f.params.iter().map(|p| p.ty.clone()).collect());
+                        }
+                    }
+                }
+                let base_ty = self.dir_ty_of_expr(base, env)?;
+                let recv_base = Self::base_named_type(&self.resolve_type_alias(&base_ty))?;
+                self.method_decls
+                    .get(&(recv_base, head.to_string()))
+                    .map(|f| f.params.iter().map(|p| p.ty.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+
+    fn check_chan_dir_coercion(
+        &mut self,
+        val_expr: &Expr,
+        target_ty: &hy_syntax::TypeExpr,
+        env: &ChanDirEnv,
+        span: Span,
+    ) {
+        let Some(val_ty) = self.dir_ty_of_expr(val_expr, env) else {
+            return;
+        };
+        self.check_chan_dir_types_coercion(&val_ty, target_ty, span);
+    }
+
+    fn check_chan_dir_types_coercion(
+        &mut self,
+        val_ty: &hy_syntax::TypeExpr,
+        target_ty: &hy_syntax::TypeExpr,
+        span: Span,
+    ) {
+        use hy_syntax::{ChanDir, TypeExpr};
+        let res_val = self.resolve_type_alias(val_ty);
+        let res_target = self.resolve_type_alias(target_ty);
+
+        if let (
+            TypeExpr::Chan {
+                dir: src_dir,
+                elem: src_elem,
+                ..
+            },
+            TypeExpr::Chan {
+                dir: target_dir,
+                elem: target_elem,
+                ..
+            },
+        ) = (&res_val, &res_target)
+        {
+            if *src_dir != *target_dir && *src_dir != ChanDir::Both {
+                self.emit_chan_dir_mismatch(val_ty, target_ty, span);
+                return;
+            }
+
+            let se_res = self.resolve_type_alias(src_elem);
+            let te_res = self.resolve_type_alias(target_elem);
+            if let (
+                TypeExpr::Chan { dir: se_dir, .. },
+                TypeExpr::Chan { dir: te_dir, .. },
+            ) = (&se_res, &te_res)
+            {
+                if se_dir != te_dir {
+                    self.emit_chan_dir_mismatch(val_ty, target_ty, span);
+                }
+            }
+        }
+    }
+
+    fn emit_chan_dir_mismatch(
+        &mut self,
+        src_ty: &hy_syntax::TypeExpr,
+        target_ty: &hy_syntax::TypeExpr,
+        span: Span,
+    ) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3012" && d.span == span)
+        {
+            return;
+        }
+        let msg = format!(
+            "cannot use `{}` value where `{}` is required — a unidirectional channel never converts to another direction (HYB-E3012)",
+            src_ty.render(),
+            target_ty.render(),
+        );
+        let notes = vec![
+            "why: Go's implicit channel conversion only widens a bidirectional `chan T` to `chan<- T` or `<-chan T`; a unidirectional channel cannot convert to the other direction or back to `chan T` (issue #623)".to_string(),
+            "fix: declare the source channel as bidirectional `chan T`, or ascribe/match the destination slot's direction".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3012", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
 }
 
 struct ChanDirEnv {
     scopes: Vec< std::collections::HashMap<String, Option<hy_syntax::TypeExpr>> >,
+    return_types: Vec<Vec<hy_syntax::TypeExpr>>,
 }
 
 impl ChanDirEnv {
     fn new() -> Self {
         ChanDirEnv {
             scopes: vec![std::collections::HashMap::new()],
+            return_types: Vec::new(),
         }
+    }
+
+    fn push_return_types(&mut self, types: Vec<hy_syntax::TypeExpr>) {
+        self.return_types.push(types);
+    }
+
+    fn pop_return_types(&mut self) {
+        self.return_types.pop();
+    }
+
+    fn current_return_types(&self) -> Option<&[hy_syntax::TypeExpr]> {
+        self.return_types.last().map(|v| v.as_slice())
     }
 
     fn push(&mut self) {
