@@ -2265,16 +2265,20 @@ impl Emitter {
                         .is_some_and(|o| Self::stmt_mentions_ident(o, target))
             }
             Stmt::For { kind, body, .. } => {
-                let kind_mentions = match kind {
-                    ForKind::Infinite => false,
-                    ForKind::While { cond } => Self::expr_mentions_ident(cond, target),
-                    ForKind::Range { lo, hi, .. } => {
+                let (kind_mentions, shadowed) = match kind {
+                    ForKind::Infinite => (false, false),
+                    ForKind::While { cond } => (Self::expr_mentions_ident(cond, target), false),
+                    ForKind::Range { var, lo, hi, .. } => (
                         Self::expr_mentions_ident(lo, target)
-                            || Self::expr_mentions_ident(hi, target)
-                    }
-                    ForKind::Iterate { expr, .. } => Self::expr_mentions_ident(expr, target),
+                            || Self::expr_mentions_ident(hi, target),
+                        var == target,
+                    ),
+                    ForKind::Iterate { vars, expr } => (
+                        Self::expr_mentions_ident(expr, target),
+                        vars.iter().any(|v| v == target),
+                    ),
                 };
-                kind_mentions || Self::block_mentions_ident(body, target)
+                kind_mentions || (!shadowed && Self::block_mentions_ident(body, target))
             }
             Stmt::Match { subject, arms, .. } => {
                 Self::expr_mentions_ident(subject, target)
@@ -2303,7 +2307,11 @@ impl Emitter {
                     }
                     SelectArmKind::Default => false,
                 };
-                head_mentions || Self::block_mentions_ident(&a.body, target)
+                let shadowed = match &a.kind {
+                    SelectArmKind::Recv { names, .. } => names.iter().any(|n| n == target),
+                    _ => false,
+                };
+                head_mentions || (!shadowed && Self::block_mentions_ident(&a.body, target))
             }),
             Stmt::Defer { call, .. } => Self::expr_mentions_ident(call, target),
             Stmt::Task { callee, args, .. } => {

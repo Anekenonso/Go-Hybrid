@@ -91,3 +91,115 @@ fn main() {
         go
     );
 }
+
+#[test]
+fn slot_loan_store_back_emits_before_task_spawn_when_subsequent_range_loop_shadows_loan_name_issue_547() {
+    let src = "\
+struct item {
+    x int
+}
+fn worker(m map[string]item, done chan bool) {
+    done <- true
+}
+fn main() {
+    m := map[string]item{\"a\": {x: 0}}
+    done := make(chan bool, 1)
+    n := &m[\"a\"]
+    n.x = 1
+    task worker(move m, done)
+    total := 0
+    for n in 0..1000 {
+        total += n
+    }
+    <-done
+}
+";
+    let ast = parse_file("loan_shadow_range.hy", src).expect("parses");
+    let go = emit_go(&ast).expect("emits");
+    let mut_pos = go.find("n.x = 1").expect("has loan mutation");
+    let flush_pos = go.find("m[\"a\"] = n").expect("has store-back");
+    let spawn_pos = go.find("go worker(m, done)").expect("has task spawn");
+    assert!(
+        mut_pos < flush_pos && flush_pos < spawn_pos,
+        "store-back m[\"a\"] = n must be flushed before task spawn go worker(m, done), got:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "expected exactly one store-back, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_store_back_emits_before_task_spawn_when_subsequent_iterate_loop_shadows_loan_name_issue_547() {
+    let src = "\
+struct item {
+    x int
+}
+fn worker(m map[string]item, done chan bool) {
+    done <- true
+}
+fn main() {
+    m := map[string]item{\"a\": {x: 0}}
+    done := make(chan bool, 1)
+    n := &m[\"a\"]
+    n.x = 1
+    task worker(move m, done)
+    items := []int{1, 2, 3}
+    total := 0
+    for n in items {
+        total += n
+    }
+    <-done
+}
+";
+    let ast = parse_file("loan_shadow_iterate.hy", src).expect("parses");
+    let go = emit_go(&ast).expect("emits");
+    let mut_pos = go.find("n.x = 1").expect("has loan mutation");
+    let flush_pos = go.find("m[\"a\"] = n").expect("has store-back");
+    let spawn_pos = go.find("go worker(m, done)").expect("has task spawn");
+    assert!(
+        mut_pos < flush_pos && flush_pos < spawn_pos,
+        "store-back m[\"a\"] = n must be flushed before task spawn go worker(m, done), got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_store_back_emits_before_task_spawn_when_subsequent_select_recv_shadows_loan_name_issue_547() {
+    let src = "\
+struct item {
+    x int
+}
+fn worker(m map[string]item, done chan bool) {
+    done <- true
+}
+fn main() {
+    m := map[string]item{\"a\": {x: 0}}
+    done := make(chan bool, 1)
+    n := &m[\"a\"]
+    n.x = 1
+    task worker(move m, done)
+    sig := make(chan int, 1)
+    sig <- 42
+    select {
+    n := <-sig:
+        _ = n
+    default:
+    }
+    <-done
+}
+";
+    let ast = parse_file("loan_shadow_select.hy", src).expect("parses");
+    let go = emit_go(&ast).expect("emits");
+    let mut_pos = go.find("n.x = 1").expect("has loan mutation");
+    let flush_pos = go.find("m[\"a\"] = n").expect("has store-back");
+    let spawn_pos = go.find("go worker(m, done)").expect("has task spawn");
+    assert!(
+        mut_pos < flush_pos && flush_pos < spawn_pos,
+        "store-back m[\"a\"] = n must be flushed before task spawn go worker(m, done), got:\n{}",
+        go
+    );
+}
