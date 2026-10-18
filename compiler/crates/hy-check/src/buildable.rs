@@ -1803,7 +1803,10 @@ impl<'a> Collector<'a> {
             if path.starts_with("rust/") {
                 continue;
             }
-            let root = path.rsplit('/').next().unwrap_or(path.as_str());
+            if !crate::foreign::is_curated_import(path) {
+                continue;
+            }
+            let root = crate::foreign::import_root(path);
             if !self.roots.contains(root) {
                 self.diags.push(
                     Diagnostic::error(

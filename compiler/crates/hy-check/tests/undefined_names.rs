@@ -197,3 +197,35 @@ fn dotted_first_segment_is_package_open_world() {
     accepts_without_e1001("fn main() {\n    x := foo.bar(1)\n    _ = x\n}\n");
     accepts_without_e1001("fn main() {\n    _ = undefined_obj.field\n}\n");
 }
+
+#[test]
+fn curated_package_member_resolution_rejects_unknown() {
+    // Issue #658 Gap 3: members of curated packages are resolved fail-closed at check time.
+    rejects_with_e1001("fn main() {\n    fmt.no_such_function()\n}\n");
+    rejects_with_e1001("fn main() {\n    x := io.no_such_var\n    _ = x\n}\n");
+    rejects_with_e1001("import \"net/http\"\nfn main() {\n    _ = http.status_invalid\n}\n");
+}
+
+#[test]
+fn curated_package_member_resolution_accepts_known() {
+    // Issue #658 Gap 1 & 3: valid foreign members and constants are accepted.
+    accepts_without_e1001("fn main() {\n    fmt.println(\"hello\")\n}\n");
+    accepts_without_e1001("fn main() {\n    x := io.eof\n    _ = x\n}\n");
+    accepts_without_e1001("import \"net/http\"\nfn main() {\n    _ = http.status_ok\n}\n");
+}
+
+#[test]
+fn import_outside_allowlist_rejects() {
+    // Issue #658 Gap 2: imports outside curated allowlist reject with HYB-E1001.
+    rejects_with_e1001("import \"math\"\nfn main() {\n    _ = 1\n}\n");
+    rejects_with_e1001("import \"github.com/acme/widgets\"\nfn main() {\n    _ = 1\n}\n");
+}
+
+#[test]
+fn import_inside_allowlist_accepts() {
+    // Issue #658 Gap 2: imports inside curated allowlist are accepted.
+    accepts_without_e1001("import \"net/http\"\nfn main() {\n    _ = http.status_ok\n}\n");
+    accepts_without_e1001("import \"path/filepath\"\nfn main() {\n    _ = filepath.join(\"a\", \"b\")\n}\n");
+    accepts_without_e1001("import \"rust/serde_json\"\nfn main() {\n    _ = serde_json.parse(\"[]\")\n}\n");
+}
+

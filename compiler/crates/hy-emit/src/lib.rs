@@ -217,17 +217,73 @@ const GO_BUILTIN_TYPES: &[&str] = &[
     "complex128",
 ];
 
-/// snake_case → Go exported name (`read_all` → `ReadAll`, `args` → `Args`).
-pub(crate) fn to_go_name(name: &str) -> String {
-    name.split('_')
-        .filter(|p| !p.is_empty())
-        .map(|p| {
+fn initialism_or_title(part: &str) -> String {
+    match part {
+        "eof" => "EOF".to_string(),
+        "ok" => "OK".to_string(),
+        "url" => "URL".to_string(),
+        "uri" => "URI".to_string(),
+        "http" => "HTTP".to_string(),
+        "https" => "HTTPS".to_string(),
+        "id" => "ID".to_string(),
+        "ip" => "IP".to_string(),
+        "tcp" => "TCP".to_string(),
+        "udp" => "UDP".to_string(),
+        "json" => "JSON".to_string(),
+        "xml" => "XML".to_string(),
+        "html" => "HTML".to_string(),
+        "css" => "CSS".to_string(),
+        "sql" => "SQL".to_string(),
+        "api" => "API".to_string(),
+        "ascii" => "ASCII".to_string(),
+        "utf8" => "UTF8".to_string(),
+        "rfc3339" => "RFC3339".to_string(),
+        "rfc3339nano" => "RFC3339Nano".to_string(),
+        "rfc822" => "RFC822".to_string(),
+        "rfc822z" => "RFC822Z".to_string(),
+        "rfc850" => "RFC850".to_string(),
+        "rfc1123" => "RFC1123".to_string(),
+        "rfc1123z" => "RFC1123Z".to_string(),
+        "cpu" => "CPU".to_string(),
+        "tls" => "TLS".to_string(),
+        "rpc" => "RPC".to_string(),
+        "ssh" => "SSH".to_string(),
+        "uuid" => "UUID".to_string(),
+        "guid" => "GUID".to_string(),
+        "io" => "IO".to_string(),
+        "os" => "OS".to_string(),
+        "cidr" => "CIDR".to_string(),
+        "dns" => "DNS".to_string(),
+        "cname" => "CNAME".to_string(),
+        "srv" => "SRV".to_string(),
+        "mx" => "MX".to_string(),
+        "txt" => "TXT".to_string(),
+        "qps" => "QPS".to_string(),
+        "ram" => "RAM".to_string(),
+        "sla" => "SLA".to_string(),
+        "smtp" => "SMTP".to_string(),
+        "ttl" => "TTL".to_string(),
+        "ui" => "UI".to_string(),
+        "uid" => "UID".to_string(),
+        "vm" => "VM".to_string(),
+        "xmpp" => "XMPP".to_string(),
+        "xsrf" => "XSRF".to_string(),
+        "xss" => "XSS".to_string(),
+        p => {
             let mut cs = p.chars();
             match cs.next() {
                 Some(c) => c.to_uppercase().collect::<String>() + cs.as_str(),
                 None => String::new(),
             }
-        })
+        }
+    }
+}
+
+/// snake_case → Go exported name (`read_all` → `ReadAll`, `status_ok` → `StatusOK`, `io.eof` → `io.EOF`).
+pub(crate) fn to_go_name(name: &str) -> String {
+    name.split('_')
+        .filter(|p| !p.is_empty())
+        .map(initialism_or_title)
         .collect()
 }
 
@@ -270,6 +326,8 @@ pub(crate) fn is_package_root(name: &str) -> bool {
             | "sha3"
             | "serde_json"
             | "regex"
+            | "net"
+            | "flate2"
     )
 }
 
@@ -282,6 +340,8 @@ pub(crate) fn special_member(pkg: &str, name: &str) -> Option<MemberSpecial> {
         ("os", "stdout") => Some(MemberSpecial::Var("os.Stdout")),
         ("os", "stderr") => Some(MemberSpecial::Var("os.Stderr")),
         ("os", "stdin") => Some(MemberSpecial::Var("os.Stdin")),
+        ("io", "eof") => Some(MemberSpecial::Var("io.EOF")),
+        ("http", "status_ok") => Some(MemberSpecial::Var("http.StatusOK")),
         // fmt's stderr family carries the writer as the first argument.
         ("fmt", "eprintln") => Some(MemberSpecial::StderrCall("Fprintln")),
         ("fmt", "eprint") => Some(MemberSpecial::StderrCall("Fprint")),

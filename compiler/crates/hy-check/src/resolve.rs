@@ -265,7 +265,30 @@ impl<'a> Scan<'a> {
                 self.run_place(base);
                 self.run_expr(index);
             }
-            PlaceKind::Field { base, .. } => self.run_place(base),
+            PlaceKind::Field { base, name } => {
+                if self.mode == Mode::Check {
+                    if let PlaceKind::Ident(root) = &base.kind {
+                        if self.packages.contains(root)
+                            || crate::foreign::BUILTIN_PACKAGES.contains(&root.as_str())
+                        {
+                            if !crate::foreign::is_known_package_member(root, name) {
+                                let msg = format!(
+                                    "`{}` is not a member of package `{}` (HYB-E1001)",
+                                    name, root
+                                );
+                                self.diags.push(
+                                    hy_diag::Diagnostic::error("HYB-E1001", self.path.to_string(), p.span, msg).with_notes(vec![
+                                        format!("check the member name in the `{}` package documentation", root),
+                                        "foreign names normalize to snake_case at binding time".to_string(),
+                                    ]),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.run_place(base);
+            }
             PlaceKind::AddrOf { base } => self.run_place(base),
         }
     }
@@ -304,16 +327,30 @@ impl<'a> Scan<'a> {
                     self.run_expr(h);
                 }
             }
-            // A DIRECT ident base of a dotted access is exempt: that shape is
-            // the package-prefix surface (`fmt.println`, spike-10's `hex.encode`,
-            // any std root the emitter's usage-driven import collection maps),
-            // and the emitter's contract is "unknown roots still work — they
-            // emit verbatim and get an import" (hy-emit is_package_root). The
-            // checker cannot tell a real root from a typo'd one, so a dotted
-            // first segment stays with the go toolchain; everything bare
-            // (callees, plain reads, assignment targets, array lengths) is
-            // checked here.
-            Expr::Field { base, .. } => {
+            // A DIRECT ident base of a dotted access is exempt when the root
+            // is not a curated/known package: that shape is the open-world
+            // surface. Curated packages check members fail-closed (issue #658 Gap 3).
+            Expr::Field { base, name, span } => {
+                if self.mode == Mode::Check {
+                    if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                        if self.packages.contains(root)
+                            || crate::foreign::BUILTIN_PACKAGES.contains(&root.as_str())
+                        {
+                            if !crate::foreign::is_known_package_member(root, name) {
+                                let msg = format!(
+                                    "`{}` is not a member of package `{}` (HYB-E1001)",
+                                    name, root
+                                );
+                                self.diags.push(
+                                    hy_diag::Diagnostic::error("HYB-E1001", self.path.to_string(), *span, msg).with_notes(vec![
+                                        format!("check the member name in the `{}` package documentation", root),
+                                        "foreign names normalize to snake_case at binding time".to_string(),
+                                    ]),
+                                );
+                            }
+                        }
+                    }
+                }
                 let bare = matches!(
                     crate::model::unwrap_parens(base),
                     Expr::Ident { .. }

@@ -103,6 +103,7 @@ pub fn check_file(file: &File) -> CheckResult {
     let mut ck = Checker::new(file);
 
     build_tables(&mut ck);
+    ck.check_import_allowlist();
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
     ck.check_file_const_zero_divisors(); // Issue #149/#508: constant zero divisor in file consts
 
@@ -171,7 +172,7 @@ fn build_tables(ck: &mut Checker<'_>) {
         match d {
             Decl::Import { path, .. } => {
                 // `import "rust/serde_json"` → package root "serde_json".
-                let root = path.rsplit('/').next().unwrap_or(path.as_str());
+                let root = crate::foreign::import_root(path);
                 ck.packages.insert(root.to_string());
             }
             Decl::Const(c) => {
@@ -877,6 +878,27 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 }
 
 impl<'a> Checker<'a> {
+    /// MVP import allowlist (SPEC M5/M6, issue #658 Gap 2).
+    /// Packages outside the curated set reject at check time as HYB-E1001.
+    pub(crate) fn check_import_allowlist(&mut self) {
+        for d in &self.file.decls {
+            if let Decl::Import { path, span } = d {
+                if !crate::foreign::is_curated_import(path) {
+                    let msg = format!(
+                        "import `{}` is not in the curated allowlist (HYB-E1001)",
+                        path
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E1001", self.path.clone(), *span, msg).with_notes(vec![
+                            "the MVP allowlist covers standard Go packages (fmt, io, os, net/http, sync, time, strings, strconv, sort, errors, path/filepath, encoding/json, encoding/hex, bufio) and curated Rust crates (rust/serde_json, rust/flate2, rust/sha3, rust/regex)".to_string(),
+                            "packages outside the curated allowlist require custom bindings or a future release".to_string(),
+                        ]),
+                    );
+                }
+            }
+        }
+    }
+
     /// Row 14 (discussion #4): audit a `managed` block's reason/category/tickets
     /// and record it in `managed_audit` (shared between Pass B and closures.rs).
     pub(crate) fn audit_managed_block(

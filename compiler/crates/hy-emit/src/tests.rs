@@ -2529,3 +2529,22 @@ fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
         go
     );
 }
+
+#[test]
+fn initialisms_and_special_members_emit_exact_go_names() {
+    // Issue #658 Gap 1: initialisms in foreign Go names emit canonical Go capitalization.
+    assert_eq!(super::to_go_name("eof"), "EOF");
+    assert_eq!(super::to_go_name("status_ok"), "StatusOK");
+    assert_eq!(super::to_go_name("rfc3339"), "RFC3339");
+    assert_eq!(super::to_go_name("to_valid_utf8"), "ToValidUTF8");
+    assert_eq!(super::to_go_name("parse_ip"), "ParseIP");
+    assert_eq!(super::to_go_name("quote_to_ascii"), "QuoteToASCII");
+
+    let go = emit("fn main() {\n    if err == io.eof {\n        _ = http.status_ok\n    }\n}\n");
+    assert!(go.contains("io.EOF"), "must emit io.EOF:\n{}", go);
+    assert!(go.contains("http.StatusOK"), "must emit http.StatusOK:\n{}", go);
+
+    let go_call = emit("fn main() {\n    _ = strings.to_valid_utf8(\"abc\", \"\")\n}\n");
+    assert!(go_call.contains("strings.ToValidUTF8"), "must emit strings.ToValidUTF8:\n{}", go_call);
+}
+
