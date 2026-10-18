@@ -24,13 +24,15 @@ Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard mi
 import argparse
 import fnmatch
 import os
+from pathlib import Path
 import re
+import shlex
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# One discovery invocation, quoted or bare pattern: `... discover -s X -p Y`.
-DISCOVER_RE = re.compile(r"unittest\s+discover\b[^\n]*?-p\s+'?([^'\s]+)")
+# One-line discovery invocations using the explicit -s / -p form in CI.
+DISCOVER_RE = re.compile(r"unittest\s+discover\b[^\n]*")
 
 # Directories whose test files this guard covers, and how each is invoked.
 DISCOVER_DIR = "tools"   # referenced through a `unittest discover -p` pattern
@@ -39,11 +41,52 @@ DIRECT_DIRS = ("tests",)  # referenced by literal repo-relative path
 
 def registered_patterns(workflow_text):
     """Every `-p` pattern the workflow passes to `unittest discover`."""
-    return DISCOVER_RE.findall(workflow_text)
+    return [pattern for _, pattern in registered_discoveries(workflow_text)]
+
+
+def registered_discoveries(workflow_text):
+    """Keep each pattern paired with its own start directory (repo cwd).
+
+    Like the existing guard, this recognizes one-line commands with an
+    explicit -p; it is not a general YAML/shell or load_tests interpreter.
+    """
+    discoveries = []
+    for match in DISCOVER_RE.finditer(workflow_text):
+        try:
+            words = shlex.split(match.group(), comments=True)
+        except ValueError:
+            continue  # An incomplete/unsupported command registers nothing.
+        start, pattern = ".", None
+        for index, word in enumerate(words[:-1]):
+            if word == "-s":
+                start = words[index + 1]
+            elif word == "-p":
+                pattern = words[index + 1]
+        if pattern is not None:
+            discoveries.append((start, pattern))
+    return discoveries
 
 
 def is_registered_discover(name, patterns):
     return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+
+
+def is_reached_discover(root, relpath, start, pattern):
+    """Mirror discovery's directory boundary without importing test code."""
+    target = (Path(root) / relpath).resolve()
+    start_dir = (Path(root) / start).resolve()
+    if not start_dir.is_dir() or not target.is_relative_to(start_dir):
+        return False
+    if not is_registered_discover(target.name, [pattern]):
+        return False
+    # unittest visits files in the start directory directly, but only
+    # recurses into subdirectories that are regular Python packages.
+    parent = target.parent
+    while parent != start_dir:
+        if not (parent / "__init__.py").is_file():
+            return False
+        parent = parent.parent
+    return True
 
 
 def is_registered_direct(relpath, workflow_text):
@@ -66,11 +109,12 @@ def find_test_files(root, directory):
 
 def unregistered(root, workflow_text):
     """Test files no reference in the workflow reaches."""
-    patterns = registered_patterns(workflow_text)
+    discoveries = registered_discoveries(workflow_text)
     missing = []
     for rel in find_test_files(root, DISCOVER_DIR):
-        if not is_registered_discover(os.path.basename(rel), patterns):
-            missing.append((rel, "no `unittest discover -p` pattern matches it"))
+        if not any(is_reached_discover(root, rel, start, pattern)
+                   for start, pattern in discoveries):
+            missing.append((rel, "no `unittest discover -s ... -p ...` invocation reaches it"))
     for directory in DIRECT_DIRS:
         for rel in find_test_files(root, directory):
             if not is_registered_direct(rel, workflow_text):

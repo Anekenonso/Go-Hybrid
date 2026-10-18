@@ -11,6 +11,8 @@ import contextlib
 import importlib.util
 import io
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -81,6 +83,80 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(sorted(rel for rel, _ in guard.unregistered(root, text)),
                          ["tools/fuzz/test_hyfuzz.py", "tools/runner/test_runner.py"])
 
+    def test_matching_basename_outside_start_directory_is_unregistered(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools/fuzz -p 'test_*.py'\n",
+            ["tools/test_orphan.py", "tools/fuzz/test_control.py",
+             "tools/runner/test_runner.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/runner/test_runner.py", "tools/test_orphan.py"])
+
+    def test_discovery_does_not_descend_into_non_package_directory(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools -p 'test_*.py'\n",
+            ["tools/test_control.py", "tools/fuzz/test_orphan.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/fuzz/test_orphan.py"])
+        # An explicit start directory needs no __init__.py of its own.
+        text += "python3 -m unittest discover -s tools/fuzz -p 'test_*.py'\n"
+        self.assertEqual(guard.unregistered(root, text), [])
+
+    def test_discovery_descends_through_packages_only(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools -p 'test_*.py'\n",
+            ["tools/pkg/__init__.py", "tools/pkg/test_one.py",
+             "tools/pkg/deep/test_two.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/pkg/deep/test_two.py"])
+        (root / "tools/pkg/deep/__init__.py").write_text("", encoding="utf-8")
+        self.assertEqual(guard.unregistered(root, text), [])
+
+    def test_patterns_stay_paired_with_their_start_directories(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools/fuzz -p test_one.py\n"
+            "python3 -m unittest discover -s tools/runner -p test_two.py\n",
+            ["tools/fuzz/test_one.py", "tools/fuzz/test_two.py",
+             "tools/runner/test_two.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/fuzz/test_two.py"])
+
+    def test_quoted_paths_and_reordered_flags_keep_their_scope(self):
+        root, text = self.build(
+            'python3 -m unittest discover -p "test_*.py" -s "./tools/with space"\n',
+            ["tools/with space/test_one.py", "tools/test_orphan.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_orphan.py"])
+
+    def test_file_cannot_be_a_start_directory(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools/test_one.py -p test_one.py\n",
+            ["tools/test_one.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_one.py"])
+
+    def test_actual_discovery_skips_failing_test_but_guard_must_reject_it(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools/fuzz -p 'test_*.py'\n",
+            ["tools/test_orphan.py", "tools/fuzz/test_control.py"])
+        (root / "tools/test_orphan.py").write_text(
+            "import unittest\nclass Orphan(unittest.TestCase):\n"
+            "    def test_failure(self): self.fail('orphan really ran')\n",
+            encoding="utf-8")
+        (root / "tools/fuzz/test_control.py").write_text(
+            "import unittest\nclass Control(unittest.TestCase):\n"
+            "    def test_pass(self): pass\n", encoding="utf-8")
+        command = [sys.executable, "-m", "unittest", "discover", "-s"]
+        skipped = subprocess.run(command + ["tools/fuzz", "-p", "test_*.py"],
+                                 cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        self.assertIn("Ran 1 test", skipped.stderr)
+        exercised = subprocess.run(command + ["tools", "-p", "test_orphan.py"],
+                                   cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(exercised.returncode, 0)
+        self.assertIn("orphan really ran", exercised.stderr)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_orphan.py"])
+
     def test_direct_script_is_registered_only_when_its_path_is_named(self):
         root, text = self.build(
             "          python3 tests/test_install_runtime.py\n",
@@ -142,6 +218,11 @@ class GuardMisuseTests(unittest.TestCase):
         self.assertEqual(
             self.run_main("python3 -m unittest discover -s tools -p test_x.py\n",
                           ["tools/test_x.py", "tools/test_y.py"]), 1)
+
+    def test_matching_orphan_outside_discovery_directory_exits_one(self):
+        self.assertEqual(
+            self.run_main("python3 -m unittest discover -s tools/fuzz -p 'test_*.py'\n",
+                          ["tools/fuzz/test_control.py", "tools/test_orphan.py"]), 1)
 
 
 if __name__ == "__main__":
